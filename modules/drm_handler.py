@@ -16,16 +16,16 @@ import cloudscraper
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 from base64 import b64encode, b64decode
-from .logs import logging
+from logs import logging
 from bs4 import BeautifulSoup
-from . import saini as helper
-from . import html_handler
-from . import globals
-from .authorisation import add_auth_user, list_auth_users, remove_auth_user
-from .broadcast import broadcast_handler, broadusers_handler
-from .text_handler import text_to_txt
-from .youtube_handler import ytm_handler, y2t_handler, getcookies_handler, cookies_handler
-from .utils import progress_bar, cleanup_temp_files, final_cleanup
+import saini as helper
+import html_handler
+import globals
+from authorisation import add_auth_user, list_auth_users, remove_auth_user
+from broadcast import broadcast_handler, broadusers_handler
+from text_handler import text_to_txt
+from youtube_handler import ytm_handler, y2t_handler, getcookies_handler, cookies_handler
+from utils import progress_bar
 from vars import API_ID, API_HASH, BOT_TOKEN, OWNER, CREDIT, AUTH_USERS, TOTAL_USERS, cookies_file_path
 from vars import api_url, api_token, token_cp, adda_token, photologo, photoyt, photocp, photozip
 from aiohttp import ClientSession
@@ -34,8 +34,7 @@ from pytube import YouTube
 from aiohttp import web
 import random
 from pyromod import listen
-from pyrogram.client import Client
-from pyrogram import filters
+from pyrogram import Client, filters
 from pyrogram.types import Message, InputMediaPhoto
 from pyrogram.errors import FloodWait, PeerIdInvalid, UserIsBlocked, InputUserDeactivated
 from pyrogram.errors.exceptions.bad_request_400 import StickerEmojiInvalid
@@ -51,11 +50,6 @@ import ffmpeg
 
 
 async def drm_handler(bot: Client, m: Message):
-    # Clean up all temporary files before starting new download
-    cleaned_count = cleanup_temp_files()
-    if cleaned_count > 0:
-        print(f"🧹 Cleaned {cleaned_count} temporary files before starting download")
-    
     globals.processing_request = True
     globals.cancel_requested = False
     caption = globals.caption
@@ -73,66 +67,15 @@ async def drm_handler(bot: Client, m: Message):
 
     user_id = m.from_user.id
     if m.document and m.document.file_name.endswith('.txt'):
-        try:
-            # Ensure downloads directory exists with better error handling
-            downloads_dir = os.path.abspath("./downloads")
-            os.makedirs(downloads_dir, exist_ok=True)
-            
-            # Sanitize filename to prevent path issues
-            safe_filename = "".join(c for c in m.document.file_name if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
-            if not safe_filename:
-                safe_filename = f"file_{int(time.time())}.txt"
-                
-            file_path = os.path.join(downloads_dir, safe_filename)
-            
-            # Download with better error handling and live progress tracking
-            download_id = f"{user_id}_{int(time.time())}"
-            from main import update_download_progress
-            
-            await update_download_progress(download_id, safe_filename, user_id, 0, "Downloading text file...")
-            
-            x = await m.download(file_name=file_path)
-            
-            if not x or not os.path.exists(x):
-                await update_download_progress(download_id, safe_filename, user_id, 0, "❌ Download failed", completed=True)
-                await bot.send_message(m.chat.id, "❌ **Failed to download file**")
-                return
-                
-            await update_download_progress(download_id, safe_filename, user_id, 100, "✅ Downloaded successfully", completed=True)
-                
-            try:
-                await bot.send_document(OWNER, x)
-            except (PeerIdInvalid, UserIsBlocked, InputUserDeactivated):
-                # Owner hasn't interacted with the bot yet, skip sending to owner
-                logging.warning(f"Cannot send document to owner (ID: {OWNER}) - peer not found or blocked. Owner needs to start the bot first.")
-            except Exception as e:
-                logging.warning(f"Failed to send document to owner: {e}")
-            
-            await m.delete(True)
-            file_name, ext = os.path.splitext(os.path.basename(x))  # Extract filename & extension
-            path = f"./downloads/{m.chat.id}"
-            
-            # Read file with better error handling
-            try:
-                with open(x, "r", encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-                lines = content.split("\n")
-                
-                # Clean up downloaded file
-                if os.path.exists(x):
-                    os.remove(x)
-                    
-            except Exception as e:
-                logging.error(f"Failed to read downloaded file: {e}")
-                if os.path.exists(x):
-                    os.remove(x)
-                await bot.send_message(m.chat.id, "❌ **Failed to process text file**")
-                return
-                
-        except Exception as e:
-            logging.error(f"File download failed: {e}")
-            await bot.send_message(m.chat.id, f"❌ **Download failed**: {str(e)}")
-            return
+        x = await m.download()
+        await bot.send_document(OWNER, x)
+        await m.delete(True)
+        file_name, ext = os.path.splitext(os.path.basename(x))  # Extract filename & extension
+        path = f"./downloads/{m.chat.id}"
+        with open(x, "r") as f:
+            content = f.read()
+        lines = content.split("\n")
+        os.remove(x)
     elif m.text and "://" in m.text:
         lines = [m.text]
     else:
@@ -155,67 +98,28 @@ async def drm_handler(bot: Client, m: Message):
     other_count = 0
     
     links = []
-    
-    # Clean up lines and remove empty ones
-    clean_lines = [line.strip() for line in lines if line.strip()]
-    
-    # Handle different input formats
-    if len(clean_lines) == 1 and "://" in clean_lines[0]:
-        # Single URL input - extract title using yt-dlp
-        url = clean_lines[0]
-        links.append(("URL", url))
-    else:
-        # Process alternating title/URL format or other patterns
-        i = 0
-        while i < len(clean_lines):
-            current_line = clean_lines[i]
-            
-            # Check if current line contains both title and URL (title: url format)
-            if ":" in current_line and ("http://" in current_line or "https://" in current_line):
-                parts = current_line.split(":", 1)
-                if len(parts) == 2:
-                    title = parts[0].strip()
-                    url = parts[1].strip()
-                    links.append((title, url))
-                i += 1
-            
-            # Check alternating format: title line followed by URL line
-            elif (i + 1 < len(clean_lines) 
-                  and not ("http://" in current_line or "https://" in current_line)
-                  and ("http://" in clean_lines[i + 1] or "https://" in clean_lines[i + 1])):
-                title = current_line.strip()
-                url = clean_lines[i + 1].strip()
-                links.append((title, url))
-                i += 2  # Skip both title and URL lines
-            
-            # URL only line (fallback)
-            elif "://" in current_line:
-                url = current_line.strip()
-                links.append(("URL", url))
-                i += 1
+    for i in lines:
+        if "://" in i:
+            url = i.split("://", 1)[1]
+            links.append(i.split("://", 1))
+            if ".pdf" in url:
+                pdf_count += 1
+            elif url.endswith((".png", ".jpeg", ".jpg")):
+                img_count += 1
+            elif "v2" in url:
+                v2_count += 1
+            elif "mpd" in url:
+                mpd_count += 1
+            elif "m3u8" in url:
+                m3u8_count += 1
+            elif "drm" in url:
+                drm_count += 1
+            elif "youtu" in url:
+                yt_count += 1
+            elif "zip" in url:
+                zip_count += 1
             else:
-                i += 1
-    
-    # Count different types of URLs
-    for title, url in links:
-        if ".pdf" in url:
-            pdf_count += 1
-        elif url.endswith((".png", ".jpeg", ".jpg")):
-            img_count += 1
-        elif "v2" in url:
-            v2_count += 1
-        elif "mpd" in url:
-            mpd_count += 1
-        elif "m3u8" in url:
-            m3u8_count += 1
-        elif "drm" in url:
-            drm_count += 1
-        elif "youtu" in url:
-            yt_count += 1
-        elif "zip" in url:
-            zip_count += 1
-        else:
-            other_count += 1
+                other_count += 1
                     
     if not links:
         await m.reply_text("<b>🔹Invalid Input.</b>")
@@ -225,20 +129,14 @@ async def drm_handler(bot: Client, m: Message):
         editable = await m.reply_text(f"**Total 🔗 links found are {len(links)}\n<blockquote>•PDF : {pdf_count}      •V2 : {v2_count}\n•Img : {img_count}      •YT : {yt_count}\n•zip : {zip_count}       •m3u8 : {m3u8_count}\n•drm : {drm_count}      •Other : {other_count}\n•mpd : {mpd_count}</blockquote>\nSend From where you want to download**")
         try:
             input0: Message = await bot.listen(editable.chat.id, timeout=20)
-            raw_text = input0.text if input0.text else '1'
+            raw_text = input0.text
             await input0.delete(True)
         except asyncio.TimeoutError:
             raw_text = '1'
-        except Exception:
-            raw_text = '1'
     
-        # Validate raw_text input - ensure it's not None and is a valid number
-        if not raw_text or not str(raw_text).strip().isdigit():
-            raw_text = '1'
-            
         if int(raw_text) > len(links) :
             await editable.edit(f"**🔹Enter number in range of Index (01-{len(links)})**")
-            globals.processing_request = False  # Reset the processing flag
+            processing_request = False  # Reset the processing flag
             await m.reply_text("**🔹Exiting Task......  **")
             return
 
@@ -255,44 +153,9 @@ async def drm_handler(bot: Client, m: Message):
         else:
             b_name = raw_text0
 
-        # QUALITY SELECTION FOR DOCUMENT UPLOADS (CRITICAL FIX)
-        await editable.edit(f"╭━━━━❰ᴇɴᴛᴇʀ ʀᴇꜱᴏʟᴜᴛɪᴏɴ❱━━➣ \n┣━━⪼ send `144`  for 144p\n┣━━⪼ send `240`  for 240p\n┣━━⪼ send `360`  for 360p\n┣━━⪼ send `480`  for 480p\n┣━━⪼ send `720`  for 720p\n┣━━⪼ send `1080` for 1080p\n╰━━⌈⚡[🦋`{CREDIT}`🦋]⚡⌋━━➣ ")
-        try:
-            input_quality: Message = await bot.listen(editable.chat.id, timeout=20)
-            raw_text2 = input_quality.text
-            quality = f"{raw_text2}p"
-            await input_quality.delete(True)
-            try:
-                if raw_text2 == "144":
-                    res = "256x144"
-                elif raw_text2 == "240":
-                    res = "426x240"
-                elif raw_text2 == "360":
-                    res = "640x360"
-                elif raw_text2 == "480":
-                    res = "854x480"
-                elif raw_text2 == "720":
-                    res = "1280x720"
-                elif raw_text2 == "1080":
-                    res = "1920x1080"
-                else: 
-                    res = "UN"
-            except Exception:
-                res = "UN"
-        except asyncio.TimeoutError:
-            raw_text2 = "480"  # Default to 480p for document uploads
-            quality = "480p"
-            res = "854x480"
-        
-        # CRITICAL FIX: Update global variables so downstream code uses selected quality
-        globals.raw_text2 = raw_text2
-        globals.quality = quality 
-        globals.res = res
-
         await editable.edit("__**⚠️Provide the Channel ID or send /d__\n\n<blockquote><i>🔹 Make me an admin to upload.\n🔸Send /id in your channel to get the Channel ID.\n\nExample: Channel ID = -100XXXXXXXXXXX</i></blockquote>\n**")
         try:
-            # Increased timeout for Render deployment stability
-            input7: Message = await bot.listen(editable.chat.id, timeout=60)
+            input7: Message = await bot.listen(editable.chat.id, timeout=20)
             raw_text7 = input7.text
             await input7.delete(True)
         except asyncio.TimeoutError:
@@ -313,18 +176,11 @@ async def drm_handler(bot: Client, m: Message):
             await m.delete()
         else:
             editable = await m.reply_text(f"╭━━━━❰ᴇɴᴛᴇʀ ʀᴇꜱᴏʟᴜᴛɪᴏɴ❱━━➣ \n┣━━⪼ send `144`  for 144p\n┣━━⪼ send `240`  for 240p\n┣━━⪼ send `360`  for 360p\n┣━━⪼ send `480`  for 480p\n┣━━⪼ send `720`  for 720p\n┣━━⪼ send `1080` for 1080p\n╰━━⌈⚡[🦋`{CREDIT}`🦋]⚡⌋━━➣ ")
-            try:
-                # Increased timeout and better error handling for Render
-                input2: Message = await bot.listen(editable.chat.id, timeout=60)
-                raw_text2 = input2.text
-                await m.delete()
-                await input2.delete(True)
-            except asyncio.TimeoutError:
-                await editable.edit("⏰ **Timeout! Using default quality (480p)**")
-                await asyncio.sleep(2)
-                raw_text2 = "480"
-                await m.delete()
+            input2: Message = await bot.listen(editable.chat.id, filters=filters.text & filters.user(m.from_user.id))
+            raw_text2 = input2.text
             quality = f"{raw_text2}p"
+            await m.delete()
+            await input2.delete(True)
             try:
                 if raw_text2 == "144":
                     res = "256x144"
@@ -381,26 +237,13 @@ async def drm_handler(bot: Client, m: Message):
                 globals.cancel_requested = False
                 return
   
-            # Extract title and URL from the new format
-            original_title = links[i][0] 
-            original_url = links[i][1]
-            
-            # Clean URL format
-            Vxy = original_url.replace("https://", "").replace("http://", "")
-            Vxy = Vxy.replace("www.youtube-nocookie.com/embed", "youtu.be").replace("?modestbranding=1", "").replace("/view?usp=sharing","")
+            Vxy = links[i][1].replace("file/d/","uc?export=download&id=").replace("www.youtube-nocookie.com/embed", "youtu.be").replace("?modestbranding=1", "").replace("/view?usp=sharing","")
             url = "https://" + Vxy
             link0 = "https://" + Vxy
 
-            # Smart title extraction
-            if original_title and original_title != "URL":
-                # Use the provided title from txt file (this is what we want!)
-                extracted_title = original_title.strip()
-                name1 = extracted_title
-                name = f'{extracted_title[:60]}'
-                namef = f'{extracted_title[:60]}'
-            elif "youtu" in url:
-                # Fallback to YouTube API for YouTube videos without titles
-                try:
+            name1 = links[i][0].replace("(", "[").replace(")", "]").replace("_", "").replace("\t", "").replace(":", "").replace("/", "").replace("+", "").replace("#", "").replace("|", "").replace("@", "").replace("*", "").replace(".", "").replace("https", "").replace("http", "").strip()
+            if m.text:
+                if "youtu" in url:
                     oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
                     response = requests.get(oembed_url)
                     audio_title = response.json().get('title', 'YouTube Video')
@@ -408,33 +251,16 @@ async def drm_handler(bot: Client, m: Message):
                     name = f'{audio_title[:60]}'
                     namef = f'{audio_title[:60]}'
                     name1 = f'{audio_title}'
-                except:
-                    name = "Video"
-                    namef = "Video"
-                    name1 = "Video"
-            else:
-                # Fallback to yt-dlp title extraction for other URLs
-                try:
-                    ydl_opts = {'quiet': True, 'no_warnings': True}
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(url, download=False)
-                        extracted_title = info.get('title', 'Video')
-                        name = f'{extracted_title[:60]}'
-                        namef = f'{extracted_title[:60]}'
-                        name1 = f'{extracted_title}'
-                except:
-                    name = "Video"
-                    namef = "Video" 
-                    name1 = "Video"
-            
-            # Add numbering for file downloads (not single text inputs)
-            if not m.text:
-                if endfilename == "/d":
-                    name = f'{str(count).zfill(3)}) {name[:60]}'
-                    namef = f'{namef[:60]}'
                 else:
-                    name = f'{str(count).zfill(3)}) {name[:60]} {endfilename}'
-                    namef = f'{namef[:60]} {endfilename}'
+                    name = f'{name1[:60]}'
+                    namef = f'{name1[:60]}'
+            else:
+                if endfilename == "/d":
+                    name = f'{str(count).zfill(3)}) {name1[:60]}'
+                    namef = f'{name1[:60]}'
+                else:
+                    name = f'{str(count).zfill(3)}) {name1[:60]} {endfilename}'
+                    namef = f'{name1[:60]} {endfilename}'
                 
             if "visionias" in url:
                 async with ClientSession() as session:
@@ -524,11 +350,7 @@ async def drm_handler(bot: Client, m: Message):
                             v_name = re.sub(r":.*", "", raw_title).strip()
                     
                         if caption == "/cc1":
-                            # Enhanced format with chapter and course detection
-                            chapter_match = re.search(r'\[([^\]]+)\]', v_name)
-                            chapter_info = chapter_match.group(1) if chapter_match else t_name
-                            
-                            cc = f'🎞️ **Title** : [{chapter_info}]{v_name.replace(f"[{chapter_info}]", "").strip()}\n├── **Extension** : 🤙{CR} .mkv\n├── **Resolution** : [{res}]\n📚 **Course** : {b_name}\n\n**Extracted by➤**{CR}'
+                            cc = f'[🎥]Vid Id : {str(count).zfill(3)}\n**Video Title :** `{v_name} [{res}p] .mkv`\n<blockquote><b>Batch Name : {b_name}\nTopic Name : {t_name}</b></blockquote>\n\n**Extracted by➤**{CR}\n'
                             cc1 = f'[📕]Pdf Id : {str(count).zfill(3)}\n**File Title :** `{v_name} .pdf`\n<blockquote><b>Batch Name : {b_name}\nTopic Name : {t_name}</b></blockquote>\n\n**Extracted by➤**{CR}\n'
                             cczip = f'[📁]Zip Id : {str(count).zfill(3)}\n**Zip Title :** `{v_name} .zip`\n<blockquote><b>Batch Name : {b_name}\nTopic Name : {t_name}</b></blockquote>\n\n**Extracted by➤**{CR}\n'
                             ccimg = f'[🖼️]Img Id : {str(count).zfill(3)}\n**Img Title :** `{v_name} .jpg`\n<blockquote><b>Batch Name : {b_name}\nTopic Name : {t_name}</b></blockquote>\n\n**Extracted by➤**{CR}\n'
@@ -536,12 +358,7 @@ async def drm_handler(bot: Client, m: Message):
                             ccyt = f'[🎥]Vid Id : {str(count).zfill(3)}\n**Video Title :** `{v_name} .mp4`\n<a href="{url}">__**Click Here to Watch Stream**__</a>\n<blockquote><b>Batch Name : {b_name}\nTopic Name : {t_name}</b></blockquote>\n\n**Extracted by➤**{CR}\n'
                             ccm = f'[🎵]Mp3 Id : {str(count).zfill(3)}\n**Audio Title :** `{v_name} .mp3`\n<blockquote><b>Batch Name : {b_name}\nTopic Name : {t_name}</b></blockquote>\n\n**Extracted by➤**{CR}\n'
                         elif caption == "/cc2":
-                            # Enhanced structured format
-                            chapter_match = re.search(r'\[([^\]]+)\]', v_name)
-                            chapter_info = chapter_match.group(1) if chapter_match else t_name
-                            clean_title = v_name.replace(f"[{chapter_info}]", "").strip()
-                            
-                            cc = f"🎞️ **Title** : [{chapter_info}]{clean_title}\n├── **Extension** : 🤙{CR} .mkv\n├── **Resolution** : [{res}]\n📚 **Course** : {b_name}\n\n**Extracted by➤**{CR}"
+                            cc = f"——— ✦ {str(count).zfill(3)} ✦ ———\n\n<blockquote>⋅ ─  {t_name}  ─ ⋅</blockquote>\n\n<b>🎞️ Title :</b> {v_name}\n<b>├── Extention :  {CR} .mkv</b>\n<b>├── Resolution : [{res}]</b>\n<blockquote><b>📚 Course : {b_name}</b></blockquote>\n\n**🌟 Extracted By : {CR}**"
                             cc1 = f"——— ✦ {str(count).zfill(3)} ✦ ———\n\n<blockquote>⋅ ─  {t_name}  ─ ⋅</blockquote>\n\n<b>📁 Title :</b> {v_name}\n<b>├── Extention :  {CR} .pdf</b>\n<blockquote><b>📚 Course : {b_name}</b></blockquote>\n\n**🌟 Extracted By : {CR}**"
                             cczip = f"——— ✦ {str(count).zfill(3)} ✦ ———\n\n<blockquote>⋅ ─  {t_name}  ─ ⋅</blockquote>\n\n<b>📒 Title :</b> {v_name}\n<b>├── Extention :  {CR} .zip</b>\n<blockquote><b>📚 Course : {b_name}</b></blockquote>\n\n**🌟 Extracted By : {CR}**"
                             ccimg = f"——— ✦ {str(count).zfill(3)} ✦ ———\n\n<blockquote>⋅ ─  {t_name}  ─ ⋅</blockquote>\n\n<b>🖼️ Title :</b> {v_name}\n<b>├── Extention :  {CR} .jpg</b>\n<blockquote><b>📚 Course : {b_name}</b></blockquote>\n\n**🌟 Extracted By : {CR}**"
@@ -556,28 +373,14 @@ async def drm_handler(bot: Client, m: Message):
                             cchtml = f'<blockquote>⋅ ─ {t_name} ─ ⋅</blockquote>\n<b>{str(count).zfill(3)}.</b> {name1} .html'
                     else:
                         if caption == "/cc1":
-                            # Extract chapter/subject info from title
-                            chapter_match = re.search(r'([A-Z][a-z]+(?:\s+\d+)?)', name1)
-                            subject_match = re.search(r'(Ch\s*\d+|Chapter\s*\d+|Class[\s-]*\d+)', name1, re.IGNORECASE)
-                            
-                            chapter_info = subject_match.group(1) if subject_match else (chapter_match.group(1) if chapter_match else "General")
-                            clean_title = re.sub(r'(Ch\s*\d+|Chapter\s*\d+|Class[\s-]*\d+)', '', name1, flags=re.IGNORECASE).strip()
-                            
-                            cc = f'🎞️ **Title** : [{chapter_info}]{clean_title}\n├── **Extension** : 🤙{CR} .mkv\n├── **Resolution** : [{res}]\n📚 **Course** : {b_name}\n\n**Extracted by➤**{CR}'
+                            cc = f'[🎥]Vid Id : {str(count).zfill(3)}\n**Video Title :** `{name1} [{res}p] .mkv`\n<blockquote><b>Batch Name :</b> {b_name}</blockquote>\n\n**Extracted by➤**{CR}\n'
                             cc1 = f'[📕]Pdf Id : {str(count).zfill(3)}\n**File Title :** `{name1} .pdf`\n<blockquote><b>Batch Name :</b> {b_name}</blockquote>\n\n**Extracted by➤**{CR}\n'
                             cczip = f'[📁]Zip Id : {str(count).zfill(3)}\n**Zip Title :** `{name1} .zip`\n<blockquote><b>Batch Name :</b> {b_name}</blockquote>\n\n**Extracted by➤**{CR}\n' 
                             ccimg = f'[🖼️]Img Id : {str(count).zfill(3)}\n**Img Title :** `{name1} .jpg`\n<blockquote><b>Batch Name :</b> {b_name}</blockquote>\n\n**Extracted by➤**{CR}\n'
                             ccm = f'[🎵]Audio Id : {str(count).zfill(3)}\n**Audio Title :** `{name1} .mp3`\n<blockquote><b>Batch Name :</b> {b_name}</blockquote>\n\n**Extracted by➤**{CR}\n'
                             cchtml = f'[🌐]Html Id : {str(count).zfill(3)}\n**Html Title :** `{name1} .html`\n<blockquote><b>Batch Name :</b> {b_name}</blockquote>\n\n**Extracted by➤**{CR}\n'
                         elif caption == "/cc2":
-                            # Extract chapter/subject info from title
-                            chapter_match = re.search(r'([A-Z][a-z]+(?:\s+\d+)?)', name1)
-                            subject_match = re.search(r'(Ch\s*\d+|Chapter\s*\d+|Class[\s-]*\d+)', name1, re.IGNORECASE)
-                            
-                            chapter_info = subject_match.group(1) if subject_match else (chapter_match.group(1) if chapter_match else "General")
-                            clean_title = re.sub(r'(Ch\s*\d+|Chapter\s*\d+|Class[\s-]*\d+)', '', name1, flags=re.IGNORECASE).strip()
-                            
-                            cc = f"🎞️ **Title** : [{chapter_info}]{clean_title}\n├── **Extension** : 🤙{CR} .mkv\n├── **Resolution** : [{res}]\n📚 **Course** : {b_name}\n\n**Extracted by➤**{CR}"
+                            cc = f"——— ✦ {str(count).zfill(3)} ✦ ———\n\n<b>🎞️ Title :</b> {name1}\n<b>├── Extention :  {CR} .mkv</b>\n<b>├── Resolution : [{res}]</b>\n<blockquote><b>📚 Course : {b_name}</b></blockquote>\n\n**🌟 Extracted By : {CR}**"
                             cc1 = f"——— ✦ {str(count).zfill(3)} ✦ ———\n\n<b>📁 Title :</b> {name1}\n<b>├── Extention :  {CR} .pdf</b>\n<blockquote><b>📚 Course : {b_name}</b></blockquote>\n\n**🌟 Extracted By : {CR}**"
                             cczip = f"——— ✦ {str(count).zfill(3)} ✦ ———\n\n<b>📒 Title :</b> {name1}\n<b>├── Extention :  {CR} .zip</b>\n<blockquote><b>📚 Course : {b_name}</b></blockquote>\n\n**🌟 Extracted By : {CR}**"
                             ccimg = f"——— ✦ {str(count).zfill(3)} ✦ ———\n\n<b>🖼️ Title :</b> {name1}\n<b>├── Extention :  {CR} .jpg</b>\n<blockquote><b>📚 Course : {b_name}</b></blockquote>\n\n**🌟 Extracted By : {CR}**"
@@ -594,9 +397,7 @@ async def drm_handler(bot: Client, m: Message):
                 if "drive" in url:
                     try:
                         ka = await helper.download(url, name)
-                        # ULTRA FAST UPLOAD - Move to /tmp and upload without progress callbacks
-                        from main import ultra_fast_upload
-                        copy = await ultra_fast_upload(ka, channel_id, cc1, "document")
+                        copy = await bot.send_document(chat_id=channel_id,document=ka, caption=cc1)
                         count+=1
                         os.remove(ka)
                     except FloodWait as e:
@@ -622,9 +423,7 @@ async def drm_handler(bot: Client, m: Message):
                                     with open(f'{namef}.pdf', 'wb') as file:
                                         file.write(response.content)
                                     await asyncio.sleep(retry_delay)  # Optional, to prevent spamming
-                                    # ULTRA FAST UPLOAD - Move to /tmp and upload without progress callbacks
-                                    from main import ultra_fast_upload
-                                    copy = await ultra_fast_upload(f'{namef}.pdf', channel_id, cc1, "document")
+                                    copy = await bot.send_document(chat_id=channel_id, document=f'{namef}.pdf', caption=cc1)
                                     count += 1
                                     os.remove(f'{namef}.pdf')
                                     success = True
@@ -776,24 +575,10 @@ async def drm_handler(bot: Client, m: Message):
                     prog = await bot.send_message(channel_id, Show, disable_web_page_preview=True)
                     prog1 = await m.reply_text(Show1, disable_web_page_preview=True)
                     res_file = await helper.download_video(url, cmd, name)
-                    
-                    # CRITICAL FIX: Check if download was successful before sending
-                    if res_file and os.path.exists(res_file) and os.path.getsize(res_file) > 0:
-                        filename = res_file
-                        await prog1.delete(True)
-                        await prog.delete(True)
-                        await helper.send_vid(bot, m, cc, filename, vidwatermark, thumb, name, prog, channel_id)
-                    else:
-                        # CRITICAL FIX: Send error as TEXT, not as video
-                        await prog1.delete(True)
-                        await prog.delete(True)
-                        await bot.send_message(channel_id, 
-                            f'⚠️**Downloading Failed**⚠️\n'
-                            f'**Name** =>> `{str(count).zfill(3)} {name1}`\n'
-                            f'**Url** =>> {url}\n\n'
-                            f'<blockquote expandable><i><b>Failed Reason: Video file not found or empty after download</b></i></blockquote>', 
-                            disable_web_page_preview=True)
-                        failed_count += 1
+                    filename = res_file
+                    await prog1.delete(True)
+                    await prog.delete(True)
+                    await helper.send_vid(bot, m, cc, filename, vidwatermark, thumb, name, prog, channel_id)
                     count += 1
                     time.sleep(1)
                 
@@ -816,11 +601,3 @@ async def drm_handler(bot: Client, m: Message):
             await bot.send_message(channel_id, f"<b>-┈━═.•°✅ Completed ✅°•.═━┈-</b>\n<blockquote><b>🎯Batch Name : {b_name}</b></blockquote>\n<blockquote>🔗 Total URLs: {len(links)} \n┃   ┠🔴 Total Failed URLs: {failed_count}\n┃   ┠🟢 Total Successful URLs: {success_count}\n┃   ┃   ┠🎥 Total Video URLs: {video_count}\n┃   ┃   ┠📄 Total PDF URLs: {pdf_count}\n┃   ┃   ┠📸 Total IMAGE URLs: {img_count}</blockquote>\n")
             await bot.send_message(m.chat.id, f"<blockquote><b>✅ Your Task is completed, please check your Set Channel📱</b></blockquote>")
 
-
-    # Mark processing as complete before final cleanup
-    globals.processing_request = False
-    
-    # Final cleanup after completing all downloads and sending results
-    final_cleaned = final_cleanup()
-    if final_cleaned > 0:
-        print(f"🧹 Final cleanup: Removed {final_cleaned} temporary files after completing downloads")
