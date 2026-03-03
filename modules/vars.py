@@ -3,18 +3,18 @@ import os
 from os import environ
 
 # Required Telegram API credentials - Get from https://my.telegram.org/apps
-api_id_str = environ.get("API_ID")
+api_id_str = environ.get("7385595817")
 if not api_id_str:
     raise ValueError("API_ID environment variable is required. Get it from https://my.telegram.org/apps")
 API_ID = int(api_id_str)
 
-API_HASH = environ.get("API_HASH")
+API_HASH = environ.get("127b73bd59f71ee4ade8bb2161f1228f")
 if not API_HASH:
     raise ValueError("API_HASH environment variable is required. Get it from https://my.telegram.org/apps")
 API_HASH = API_HASH.strip()
 
 # Bot token from @BotFather
-BOT_TOKEN = environ.get("BOT_TOKEN")
+BOT_TOKEN = environ.get("8304200645:AAHI0AzhiGQlcCXHUA5k291kJaPXdIPJOD4")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable is required. Get it from @BotFather on Telegram")
 BOT_TOKEN = BOT_TOKEN.strip()
